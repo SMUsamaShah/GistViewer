@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Gist Viewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        input, button {
+            margin: 10px 0;
+            padding: 5px;
+        }
+        #search {
+            width: 100%;
+            box-sizing: border-box;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            cursor: pointer;
+        }
+        th:hover {
+            background-color: #ddd;
+        }
+        .sort-icon::after {
+            content: '';
+            padding-left: 5px;
+        }
+        .sort-icon.asc::after {
+            content: '\25B2';
+        }
+        .sort-icon.desc::after {
+            content: '\25BC';
+        }
+        #loadingSpinner {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        #errorMessage {
+            color: red;
+            margin-top: 10px;
+        }
+        #pagination {
+            display: flex;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        #pagination button {
+            margin: 0 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>GitHub Gist Viewer</h1>
+    <input type="text" id="username" placeholder="Enter GitHub username" aria-label="GitHub username">
+    <button onclick="fetchGists()" aria-label="Fetch Gists">Fetch Gists</button>
+    <br>
+    <input type="text" id="search" placeholder="Search by description" onkeyup="filterGists()" aria-label="Search gists">
+    <div id="loadingSpinner">Loading...</div>
+    <div id="errorMessage" role="alert" aria-live="assertive"></div>
+    <table id="gistsTable" aria-label="Gists table">
+        <thead>
+            <tr>
+                <th onclick="sortTable(0)" tabindex="0" role="button" aria-sort="none">Description <span class="sort-icon"></span></th>
+                <th onclick="sortTable(1)" tabindex="0" role="button" aria-sort="none">Files <span class="sort-icon"></span></th>
+                <th onclick="sortTable(2)" tabindex="0" role="button" aria-sort="none">Created <span class="sort-icon"></span></th>
+                <th onclick="sortTable(3)" tabindex="0" role="button" aria-sort="none">Updated <span class="sort-icon"></span></th>
+            </tr>
+        </thead>
+        <tbody id="gistsBody"></tbody>
+    </table>
+    <div id="pagination">
+        <button id="prevPage" onclick="changePage(-1)" disabled aria-label="Previous page">Previous</button>
+        <span id="pageInfo"></span>
+        <button id="nextPage" onclick="changePage(1)" disabled aria-label="Next page">Next</button>
+    </div>
+
+    <script>
+        let allGists = [];
+        let currentSort = { column: 3, ascending: false };
+        let currentPage = 1;
+        const perPage = 30;
+        let totalPages = 1;
+
+        async function fetchJson(url) {
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    if (response.status === 403) {
+                        throw new Error('Rate limit exceeded. Please try again later.');
+                    } else if (response.status === 404) {
+                        throw new Error('User not found. Please check the username and try again.');
+                    } else {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                }
+                return await response.json();
+            } catch (error) {
+                console.error('Fetch error:', error);
+                throw error;
+            }
+        }
+
+        async function fetchGists() {
+            const username = document.getElementById('username').value || new URLSearchParams(window.location.search).get('username');
+            if (!username) {
+                showError('Please enter a GitHub username');
+                return;
+            }
+
+            showLoading(true);
+            clearError();
+
+            try {
+                const response = await fetch(`https://api.github.com/users/${username}/gists?per_page=${perPage}&page=${currentPage}`);
+                const linkHeader = response.headers.get('Link');
+                if (linkHeader) {
+                    const match = linkHeader.match(/&page=(\d+)>; rel="last"/);
+                    totalPages = match ? parseInt(match[1]) : 1;
+                } else {
+                    totalPages = 1;
+                }
+
+                allGists = await response.json();
+                updatePagination();
+                sortTable(3); // Sort by last updated by default
+            } catch (error) {
+                showError(error.message);
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function displayGists(gists) {
+            const tbody = document.getElementById('gistsBody');
+            tbody.innerHTML = '';
+
+            gists.forEach(gist => {
+                const row = tbody.insertRow();
+                row.insertCell(0).innerHTML = `<a href="${gist.html_url}" target="_blank">${gist.description || 'No description'}</a>`;
+                row.insertCell(1).textContent = Object.keys(gist.files).length;
+                row.insertCell(2).textContent = new Date(gist.created_at).toLocaleDateString();
+                row.insertCell(3).textContent = new Date(gist.updated_at).toLocaleDateString();
+            });
+        }
+
+        function filterGists() {
+            const searchTerm = document.getElementById('search').value.toLowerCase();
+            const filteredGists = allGists.filter(gist => 
+                (gist.description || '').toLowerCase().includes(searchTerm)
+            );
+            sortAndDisplayGists(filteredGists);
+        }
+
+        function sortTable(column) {
+            const headers = document.querySelectorAll('th');
+            headers.forEach(header => header.setAttribute('aria-sort', 'none'));
+
+            if (currentSort.column === column) {
+                currentSort.ascending = !currentSort.ascending;
+            } else {
+                currentSort.column = column;
+                currentSort.ascending = true;
+            }
+
+            const header = headers[column];
+            header.setAttribute('aria-sort', currentSort.ascending ? 'ascending' : 'descending');
+
+            sortAndDisplayGists(allGists);
+        }
+
+        function sortAndDisplayGists(gists) {
+            const table = document.getElementById('gistsTable');
+            const headers = table.getElementsByTagName('th');
+            
+            // Reset all icons
+            for (let i = 0; i < headers.length; i++) {
+                headers[i].getElementsByClassName('sort-icon')[0].className = 'sort-icon';
+            }
+
+            // Set the icon for the current sort column
+            const currentIcon = headers[currentSort.column].getElementsByClassName('sort-icon')[0];
+            currentIcon.className = `sort-icon ${currentSort.ascending ? 'asc' : 'desc'}`;
+
+            const sortedGists = [...gists].sort((a, b) => {
+                let valueA, valueB;
+                switch(currentSort.column) {
+                    case 0: // Description
+                        valueA = a.description || '';
+                        valueB = b.description || '';
+                        break;
+                    case 1: // Files
+                        valueA = Object.keys(a.files).length;
+                        valueB = Object.keys(b.files).length;
+                        break;
+                    case 2: // Created
+                        valueA = new Date(a.created_at);
+                        valueB = new Date(b.created_at);
+                        break;
+                    case 3: // Updated
+                        valueA = new Date(a.updated_at);
+                        valueB = new Date(b.updated_at);
+                        break;
+                }
+                
+                if (valueA < valueB) return currentSort.ascending ? -1 : 1;
+                if (valueA > valueB) return currentSort.ascending ? 1 : -1;
+                return 0;
+            });
+
+            displayGists(sortedGists);
+        }
+
+        function showLoading(isLoading) {
+            document.getElementById('loadingSpinner').style.display = isLoading ? 'block' : 'none';
+        }
+
+        function showError(message) {
+            document.getElementById('errorMessage').textContent = message;
+        }
+
+        function clearError() {
+            document.getElementById('errorMessage').textContent = '';
+        }
+
+        function updatePagination() {
+            document.getElementById('prevPage').disabled = currentPage === 1;
+            document.getElementById('nextPage').disabled = currentPage === totalPages;
+            document.getElementById('pageInfo').textContent = `Page ${currentPage} of ${totalPages}`;
+        }
+
+        async function changePage(delta) {
+            currentPage += delta;
+            await fetchGists();
+        }
+
+        // Check for username in URL parameter on page load
+        window.onload = () => {
+            const urlUsername = new URLSearchParams(window.location.search).get('username');
+            if (urlUsername) {
+                document.getElementById('username').value = urlUsername;
+                fetchGists();
+            }
+        };
+
+        // Initial sort
+        sortTable(3);
+    </script>
+</body>
+</html>
