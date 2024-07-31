@@ -30,10 +30,10 @@
     <table id="gistsTable" aria-label="Gists table">
         <thead>
             <tr>
-                <th data-sort-direction="">Description <span class="sort-icon"></span></th>
-                <th data-sort-direction="">Files <span class="sort-icon"></span></th>
-                <th data-sort-direction="">Created <span class="sort-icon"></span></th>
-                <th data-sort-direction="">Updated <span class="sort-icon"></span></th>
+                <th data-sort-key="description">Description <span class="sort-icon"></span></th>
+                <th data-sort-key="files">Files <span class="sort-icon"></span></th>
+                <th data-sort-key="created_at">Created <span class="sort-icon"></span></th>
+                <th data-sort-key="updated_at">Updated <span class="sort-icon"></span></th>
             </tr>
         </thead>
         <tbody></tbody>
@@ -47,10 +47,11 @@
     <script>
     class GistViewer {
         constructor() {
-            this.allGists = [];
             this.currentPage = 1;
-            this.perPage = 100;
+            this.perPage = 100; // GitHub API's max per page
             this.totalPages = 1;
+            this.username = '';
+            this.gists = [];
 
             this.elements = {
                 username: document.getElementById('username'),
@@ -82,27 +83,25 @@
 
             const urlParams = new URLSearchParams(window.location.search);
             const urlUsername = urlParams.get('username');
+            const urlPage = urlParams.get('page');
             if (urlUsername) {
                 this.elements.username.value = urlUsername;
+                this.currentPage = urlPage ? parseInt(urlPage) : 1;
                 this.fetchGists();
             }
         }
 
         async fetchGists() {
-            const username = this.elements.username.value;
-            if (!username) return this.showError('Please enter a GitHub username');
+            this.username = this.elements.username.value;
+            if (!this.username) return this.showError('Please enter a GitHub username');
 
             this.showLoading(true);
             this.showError('');
 
             try {
-                const response = await fetch(`https://api.github.com/users/${username}/gists?per_page=100`);
-                if (!response.ok) throw new Error(response.status === 404 ? 'User not found' : `HTTP error! status: ${response.status}`);
-                
-                this.allGists = await response.json();
-                this.displayGists(this.allGists);
+                await this.fetchPage(this.currentPage);
                 this.updatePagination();
-                this.updateURL(username);
+                this.updateURL();
 
                 // Set default sort on 'Updated' column (last column) in descending order
                 const updatedColumn = this.elements.table.querySelector('th:last-child');
@@ -114,16 +113,35 @@
             }
         }
 
-        handleSearch() {
-            const searchTerm = this.elements.search.value.toLowerCase();
-            const rows = Array.from(this.elements.table.querySelectorAll('tbody tr'));
+        async fetchPage(page) {
+            const response = await fetch(`https://api.github.com/users/${this.username}/gists?per_page=${this.perPage}&page=${page}`);
+            if (!response.ok) throw new Error(response.status === 404 ? 'User not found' : `HTTP error! status: ${response.status}`);
             
-            rows.forEach(row => {
-                const text = row.textContent.toLowerCase();
-                row.style.display = text.includes(searchTerm) ? '' : 'none';
-            });
+            this.gists = await response.json();
+            this.displayGists(this.gists);
 
-            this.updatePagination();
+            // Extract pagination info from Link header
+            const linkHeader = response.headers.get('Link');
+            const paginationInfo = this.parseLinkHeader(linkHeader);
+            this.totalPages = paginationInfo.last || page;
+
+            return this.gists;
+        }
+
+        parseLinkHeader(header) {
+            if (!header) return {};
+            const links = {};
+            header.split(',').forEach(part => {
+                const section = part.split(';');
+                if (section.length !== 2) return;
+                const url = section[0].replace(/<(.*)>/, '$1').trim();
+                const name = section[1].replace(/rel="(.*)"/, '$1').trim();
+                links[name] = url;
+            });
+            return {
+                next: links.next ? parseInt(new URL(links.next).searchParams.get('page')) : null,
+                last: links.last ? parseInt(new URL(links.last).searchParams.get('page')) : null
+            };
         }
 
         displayGists(gists) {
@@ -147,52 +165,53 @@
         }
 
         updatePagination() {
-            const visibleRows = this.elements.table.querySelectorAll('tbody tr:not([style*="display: none"])');
-            this.totalPages = Math.ceil(visibleRows.length / this.perPage);
-            this.currentPage = Math.min(this.currentPage, this.totalPages);
-            this.currentPage = Math.max(this.currentPage, 1);
-
-            visibleRows.forEach((row, index) => {
-                row.style.display = (index >= (this.currentPage - 1) * this.perPage && index < this.currentPage * this.perPage) ? '' : 'none';
-            });
-
             this.elements.prevPage.disabled = this.currentPage === 1;
             this.elements.nextPage.disabled = this.currentPage === this.totalPages;
             this.elements.pageInfo.textContent = `Page ${this.currentPage} of ${this.totalPages}`;
         }
 
-        changePage(delta) {
+        async changePage(delta) {
             this.currentPage += delta;
-            this.updatePagination();
+            this.showLoading(true);
+            try {
+                await this.fetchPage(this.currentPage);
+                this.updatePagination();
+                this.updateURL();
+            } catch (error) {
+                this.showError(error.message);
+            } finally {
+                this.showLoading(false);
+            }
         }
 
-        sortTable(th, initialDirection = null) {
-            const tbody = this.elements.table.querySelector('tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
-            const columnIndex = Array.from(th.parentNode.children).indexOf(th);
+        updateURL() {
+            const url = new URL(window.location);
+            url.searchParams.set('username', this.username);
+            url.searchParams.set('page', this.currentPage);
+            window.history.pushState({}, '', url);
+        }
 
-            let currentDirection = th.dataset.sortDirection;
+        sortTable(th) {
+            const sortKey = th.dataset.sortKey;
+            const currentDirection = th.dataset.sortDirection || 'asc';
+            const newDirection = currentDirection === 'asc' ? 'desc' : 'asc';
 
-            if (initialDirection) {
-                currentDirection = initialDirection;
-            } else if (currentDirection === '' || currentDirection === 'desc') {
-                currentDirection = 'asc';
-            } else {
-                currentDirection = 'desc';
-            }
+            this.gists.sort((a, b) => {
+                let aValue = sortKey === 'files' ? Object.keys(a.files).length : a[sortKey];
+                let bValue = sortKey === 'files' ? Object.keys(b.files).length : b[sortKey];
 
-            th.dataset.sortDirection = currentDirection;
-            
-            rows.sort((a, b) => {
-                const aValue = a.children[columnIndex].textContent.trim();
-                const bValue = b.children[columnIndex].textContent.trim();
-                return currentDirection === 'asc'
-                    ? aValue.localeCompare(bValue, undefined, {numeric: true, sensitivity: 'base'}) 
-                    : bValue.localeCompare(aValue, undefined, {numeric: true, sensitivity: 'base'});
+                if (sortKey === 'description') {
+                    aValue = aValue || ''; // Handle null descriptions
+                    bValue = bValue || '';
+                }
+
+                if (aValue < bValue) return currentDirection === 'asc' ? -1 : 1;
+                if (aValue > bValue) return currentDirection === 'asc' ? 1 : -1;
+                return 0;
             });
 
-            rows.forEach(row => tbody.appendChild(row));
-            this.updateSortIcons(th, currentDirection);
+            this.displayGists(this.gists);
+            this.updateSortIcons(th, newDirection);
         }
 
         updateSortIcons(clickedTh, direction) {
@@ -200,13 +219,20 @@
                 const icon = th.querySelector('.sort-icon');
                 icon.className = 'sort-icon';
                 th.dataset.sortDirection = '';
-                th.removeAttribute('aria-sort');
             });
 
             clickedTh.dataset.sortDirection = direction;
             const icon = clickedTh.querySelector('.sort-icon');
             icon.classList.add(direction);
-            clickedTh.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
+        }
+
+        handleSearch() {
+            const searchTerm = this.elements.search.value.toLowerCase();
+            const filteredGists = this.gists.filter(gist => 
+                (gist.description && gist.description.toLowerCase().includes(searchTerm)) ||
+                Object.keys(gist.files).some(filename => filename.toLowerCase().includes(searchTerm))
+            );
+            this.displayGists(filteredGists);
         }
 
         showLoading(isLoading) {
@@ -215,12 +241,6 @@
 
         showError(message) {
             this.elements.error.textContent = message;
-        }
-
-        updateURL(username) {
-            const url = new URL(window.location);
-            url.searchParams.set('username', username);
-            window.history.pushState({}, '', url);
         }
     }
 
